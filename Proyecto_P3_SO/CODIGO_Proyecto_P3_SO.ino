@@ -1,60 +1,81 @@
 // ======================================================
+// PROYECTO: Simulación de driver de teclado con Arduino
+// ======================================================
+
+// ======================================================
 // CONFIGURACIÓN DE PINES
 // ======================================================
-const int btnInterrupcion = 2;   // Botón que agrega A/B/C según prioridad
-const int btnPrioridad    = 3;   // Cambia prioridad (0=C, 1=B, 2=A)
-const int btnBuffer       = 4;   // Envía el buffer
+const int btnInterrupcion = 2;   // Botón que dispara la interrupción (genera letra)
+const int btnPrioridad    = 3;   // Botón que cambia la prioridad (cíclica 0->1->2->0)
+const int btnBuffer       = 4;   // Botón que envía el contenido del buffer
 
-const int ledRojo     = 5;
-const int ledAmarillo = 6;
-const int ledVerde    = 7;
+const int ledRojo     = 5;       // LED estado crítico (buffer muy lleno)
+const int ledAmarillo = 6;       // LED estado medio
+const int ledVerde    = 7;       // LED estado normal
 
 // ======================================================
-// BUFFER CIRCULAR
+// BUFFER CIRCULAR (16 posiciones)
 // ======================================================
+// Arreglo donde se guardan las "teclas" simuladas
 char buffer[16];
+
+// head: índice de lectura
+// tail: índice de escritura
+// count: cuántos elementos válidos hay en el buffer
 int head = 0;
 int tail = 0;
 int count = 0;
 
-// 0 = C, 1 = B, 2 = A
+// Prioridad actual:
+// 0 = prioridad baja  -> tecla 'C'
+// 1 = prioridad media -> tecla 'B'
+// 2 = prioridad alta  -> tecla 'A'
 volatile int prioridad = 0;
 
+// Bandera para avisar al loop que la prioridad cambió (para imprimirla)
 volatile bool prioridadCambio = false;
-volatile unsigned long lastInterruptTime = 0;  // Antirrebote real
+
+// Variable para antirrebote real de la interrupción de "tecla"
+volatile unsigned long lastInterruptTime = 0;
 
 
 // ======================================================
-// AGREGAR LETRA AL BUFFER
+// AGREGAR LETRA AL BUFFER (cola FIFO circular)
 // ======================================================
 void agregarBuffer(char tecla) {
+  // Solo agregamos si aún hay espacio (máximo 16)
   if (count < 16) {
-    buffer[tail] = tecla;
-    tail = (tail + 1) % 16;
-    count++;
+    buffer[tail] = tecla;          // Guardamos en la posición de escritura
+    tail = (tail + 1) % 16;        // Avanzamos tail de forma circular (0..15)
+    count++;                       // Aumentamos el número de elementos
   }
+  // Si el buffer está lleno (count == 16), simplemente se ignora la nueva tecla
 }
 
 
 // ======================================================
-// ENVIAR EL CONTENIDO DEL BUFFER
+// ENVIAR EL CONTENIDO DEL BUFFER POR SERIAL
 // ======================================================
 void enviarBuffer() {
   Serial.println("\n=== Enviando contenido del buffer ===");
 
+  // Si no hay elementos, avisamos y salimos
   if (count == 0) {
     Serial.println("=== Buffer vacío ===");
     return;
   }
 
+  // Mientras haya datos en el buffer...
   while (count > 0) {
+    // Leemos la tecla en la posición head
     char tecla = buffer[head];
-    head = (head + 1) % 16;
-    count--;
+    head = (head + 1) % 16;       // Avanzamos head de forma circular
+    count--;                      // Un elemento menos en el buffer
 
     Serial.print("Tecla enviada: ");
     Serial.println(tecla);
 
+    // Pequeña pausa solo para ver la salida más clara en Serial
     delay(200);
   }
 
@@ -66,17 +87,19 @@ void enviarBuffer() {
 // ACTUALIZAR LEDs SEGÚN OCUPACIÓN DEL BUFFER
 // ======================================================
 void actualizarLEDs() {
-  if (count < 6) {          // 0–5
+  // count indica cuántas posiciones del buffer están ocupadas (0 a 16)
+
+  if (count < 6) {          // 0–5 elementos -> estado normal
     digitalWrite(ledVerde, HIGH);
     digitalWrite(ledAmarillo, LOW);
     digitalWrite(ledRojo, LOW);
   }
-  else if (count < 12) {    // 6–11
+  else if (count < 12) {    // 6–11 elementos -> advertencia
     digitalWrite(ledVerde, LOW);
     digitalWrite(ledAmarillo, HIGH);
     digitalWrite(ledRojo, LOW);
   }
-  else {                    // 12–15
+  else {                    // 12–16 elementos -> crítico
     digitalWrite(ledVerde, LOW);
     digitalWrite(ledAmarillo, LOW);
     digitalWrite(ledRojo, HIGH);
@@ -85,48 +108,62 @@ void actualizarLEDs() {
 
 
 // ======================================================
-// INTERRUPCIÓN: AGREGAR LETRA
+// INTERRUPCIÓN: AGREGAR LETRA SEGÚN PRIORIDAD
+// Se ejecuta cuando se presiona el botón en pin 2
 // ======================================================
 void ISR_interrupcion() {
   unsigned long t = millis();
 
-  // antirrebote
+  // Antirrebote por tiempo: si la interrupción ocurrió hace menos de 200 ms,
+  // la ignoramos para evitar múltiples lecturas por una sola pulsación.
   if (t - lastInterruptTime < 200) return;
   lastInterruptTime = t;
 
   char tecla;
 
-  if (prioridad == 2) tecla = 'A';   // Prioridad alta
-  else if (prioridad == 1) tecla = 'B';
-  else tecla = 'C';                  // Prioridad baja
+  // Según la prioridad, definimos qué letra se encola
+  if (prioridad == 2)      tecla = 'A';   // Prioridad alta
+  else if (prioridad == 1) tecla = 'B';   // Prioridad media
+  else                     tecla = 'C';   // Prioridad baja
 
+  // Agregamos la tecla al buffer circular
   agregarBuffer(tecla);
 }
 
 
 // ======================================================
 // INTERRUPCIÓN: CAMBIAR PRIORIDAD
+// Se ejecuta cuando se presiona el botón en pin 3
 // ======================================================
 void ISR_prioridad() {
+  // Cambiamos la prioridad de forma circular: 0 -> 1 -> 2 -> 0 -> ...
   prioridad = (prioridad + 1) % 3;
+
+  // Avisamos al loop principal que hubo un cambio (para imprimirlo)
   prioridadCambio = true;
 }
 
 
 // ======================================================
-// SETUP
+// SETUP: CONFIGURACIÓN INICIAL
 // ======================================================
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(9600);   // Iniciamos comunicación serie para ver mensajes
 
+  // Botones con resistencia interna de pull-up:
+  // - En reposo: leen HIGH
+  // - Cuando se presionan (conectados a GND): leen LOW
   pinMode(btnInterrupcion, INPUT_PULLUP);
   pinMode(btnPrioridad, INPUT_PULLUP);
   pinMode(btnBuffer, INPUT_PULLUP);
 
+  // Pines de salida para LEDs
   pinMode(ledRojo, OUTPUT);
   pinMode(ledAmarillo, OUTPUT);
   pinMode(ledVerde, OUTPUT);
 
+  // Configuramos interrupciones externas:
+  // FALLING: se dispara cuando el pin pasa de HIGH a LOW (botón presionado)
   attachInterrupt(digitalPinToInterrupt(btnInterrupcion), ISR_interrupcion, FALLING);
   attachInterrupt(digitalPinToInterrupt(btnPrioridad), ISR_prioridad, FALLING);
 
@@ -139,22 +176,24 @@ void setup() {
 // ======================================================
 void loop() {
 
-  // Mostrar prioridad cuando cambie
+  // Si la ISR de prioridad avisó un cambio, lo mostramos por Serial
   if (prioridadCambio) {
-    prioridadCambio = false;
+    prioridadCambio = false;  // Limpiamos la bandera
 
     Serial.print("Nueva prioridad: ");
-    Serial.println(prioridad);
+    Serial.println(prioridad);   // Muestra 0, 1 o 2
   }
 
-  // Botón que envía el buffer (D4)
+  // Botón que envía el buffer (D4) usando lectura normal (no interrupción)
+  // Como usamos INPUT_PULLUP, el botón está activo en LOW (presionado)
   if (digitalRead(btnBuffer) == LOW) {
     enviarBuffer();
-    delay(300);
+    delay(300);  // Pequeño retraso para evitar múltiples envíos por rebote
   }
 
-  // Actualizar LEDs
+  // Actualizamos el estado de los LEDs según la ocupación del buffer
   actualizarLEDs();
 
+  // Pequeña pausa para que el loop no corra demasiado rápido
   delay(40);
 }
